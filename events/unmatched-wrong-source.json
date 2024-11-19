@@ -1,0 +1,14 @@
+{
+  "version": "0",
+  "id": "8f9b6233-4c42-4fec-b56f-c6d5a2f1b1d9",
+  "detail-type": "OrderCreated",
+  "source": "wrong-service",
+  "account": "123456789012",
+  "time": "2024-01-10T15:35:00Z",
+  "region": "us-east-1",
+  "detail": {
+    "orderId": "ORD-002",
+    "customerId": "CUST-456",
+    "orderTotal": 150.00
+  }
+}

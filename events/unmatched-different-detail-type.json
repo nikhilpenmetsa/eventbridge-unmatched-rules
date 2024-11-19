@@ -1,0 +1,14 @@
+{
+  "version": "0",
+  "id": "2a5e9833-d820-4d5f-8c4c-9c6d4892e3f5",
+  "detail-type": "OrderUpdated",
+  "source": "order-service",
+  "account": "123456789012",
+  "time": "2024-01-10T15:40:00Z",
+  "region": "us-east-1",
+  "detail": {
+    "orderId": "ORD-001",
+    "status": "PROCESSING",
+    "updateTimestamp": "2024-01-10T15:40:00Z"
+  }
+}

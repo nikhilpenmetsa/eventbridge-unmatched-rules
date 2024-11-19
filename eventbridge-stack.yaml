@@ -1,0 +1,410 @@
+# eventbridge-stack.yaml
+AWSTemplateFormatVersion: '2010-09-09'
+Description: EventBridge demo setup with catch-all rule for handling unmatched events
+
+Resources:
+  # Event Bus
+  OrderEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: order-processing-bus
+
+  # SQS Queues
+  ProcessOrderQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: process-order-queue
+  
+  InverseMatchQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: inverse-match-queue
+
+  CatchAllQueue:  # Renamed from UnmatchedEventsQueue
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: catch-all-queue
+
+  # Queue Policies
+  ProcessOrderQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref ProcessOrderQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt ProcessOrderQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt OrderCreatedRule.Arn
+
+  InverseMatchQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref InverseMatchQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt InverseMatchQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt OrderCreatedInverseRule.Arn
+
+
+  CatchAllQueuePolicy:  # Renamed from UnmatchedEventsQueuePolicy
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref CatchAllQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt CatchAllQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt CatchAllRule.Arn
+
+  # EventBridge Rules
+  OrderCreatedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: order-created-rule
+      EventBusName: !Ref OrderEventBus
+      EventPattern:
+        source:
+          - order-service
+        detail-type:
+          - OrderCreated
+      Targets:
+        - Id: ProcessOrderQueue
+          Arn: !GetAtt ProcessOrderQueue.Arn
+
+  OrderCreatedInverseRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: order-created-inverse-rule
+      EventBusName: !Ref OrderEventBus
+      EventPattern:
+        # This is NOT a true inverse - events might not match either rule
+        source:
+          - anything-but:
+              - order-service
+        detail-type:
+          - anything-but:
+              - OrderCreated
+      Targets:
+        - Id: InverseMatchQueue
+          Arn: !GetAtt InverseMatchQueue.Arn
+
+  CatchAllRule:  # Renamed from UnmatchedEventsRule
+    Type: AWS::Events::Rule
+    Properties:
+      Name: catch-all-rule
+      EventBusName: !Ref OrderEventBus
+      EventPattern:
+        source: [{"prefix": ""}]
+      Targets:
+        - Id: CatchAllQueue
+          Arn: !GetAtt CatchAllQueue.Arn
+
+  AnalyzerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: catchall-analyzer
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          # Lambda function code goes here
+          import json
+          import boto3
+          import os
+          from botocore.exceptions import ClientError
+
+          def get_event_bus_rules(events_client, event_bus_name):
+              """Get all rules for the specified event bus"""
+              rules = []
+              try:
+                  paginator = events_client.get_paginator('list_rules')
+                  for page in paginator.paginate(EventBusName=event_bus_name):
+                      rules.extend(page['Rules'])
+                  return rules
+              except ClientError as e:
+                  print(f"Error getting rules: {str(e)}")
+                  return []
+
+          def test_event_pattern(events_client, rule, event):
+              """Test if an event matches a rule's pattern"""
+              try:
+                  response = events_client.test_event_pattern(
+                      EventPattern=rule['EventPattern'],
+                      Event=json.dumps(event)
+                  )
+                  return response['Result']
+              except ClientError as e:
+                  print(f"Error testing event pattern: {str(e)}")
+                  return False
+
+          def process_sqs_messages(sqs_client, queue_url, batch_size=10):
+              """Receive messages from SQS queue"""
+              try:
+                  response = sqs_client.receive_message(
+                      QueueUrl=queue_url,
+                      MaxNumberOfMessages=batch_size,  # Request up to 10 messages
+                      WaitTimeSeconds=5,              # Enable long polling
+                      AttributeNames=['All'],         # Get all message attributes
+                      MessageAttributeNames=['All']   # Get all custom message attributes
+                  )
+                  messages = response.get('Messages', [])
+                  print(f"SQS Response: {json.dumps(response, indent=2)}")
+                  print(f"Number of messages received: {len(messages)}")
+                  return messages
+              except ClientError as e:
+                  print(f"Error receiving messages: {str(e)}")
+                  return []
+
+          def delete_sqs_message(sqs_client, queue_url, receipt_handle):
+              """Delete a message from the SQS queue"""
+              try:
+                  sqs_client.delete_message(
+                      QueueUrl=queue_url,
+                      ReceiptHandle=receipt_handle
+                  )
+              except ClientError as e:
+                  print(f"Error deleting message: {str(e)}")
+
+          def lambda_handler(event, context):
+              # Initialize AWS clients
+              events_client = boto3.client('events')
+              sqs_client = boto3.client('sqs')
+              
+              # Get environment variables
+              event_bus_name = os.environ['EVENT_BUS_NAME']
+              queue_url = os.environ['QUEUE_URL']
+              
+              print(f"Starting analysis for event bus: {event_bus_name}")
+              print(f"Using queue URL: {queue_url}")
+
+              # Get queue attributes to see total messages
+              try:
+                  queue_attrs = sqs_client.get_queue_attributes(
+                      QueueUrl=queue_url,
+                      AttributeNames=['ApproximateNumberOfMessages']
+                  )
+                  total_messages = int(queue_attrs['Attributes']['ApproximateNumberOfMessages'])
+                  print(f"Approximate number of messages in queue: {total_messages}")
+              except Exception as e:
+                  print(f"Error getting queue attributes: {str(e)}")
+                  total_messages = 0              
+
+
+              # Get all rules for the event bus
+              rules = get_event_bus_rules(events_client, event_bus_name)
+              if not rules:
+                  print("No rules found for event bus")
+                  return {
+                      'statusCode': 500,
+                      'body': 'Failed to get EventBridge rules'
+                  }
+              
+              print(f"Found {len(rules)} rules on the event bus")
+              
+               # Process all messages in the queue
+              all_messages = []
+              processed_count = 0
+              
+              while True:
+                  # Get batch of messages
+                  messages = process_sqs_messages(sqs_client, queue_url, batch_size=10)
+                  if not messages:
+                      print("No more messages to process")
+                      break
+                      
+                  all_messages.extend(messages)
+                  processed_count += len(messages)
+                  
+                  print(f"Retrieved batch of {len(messages)} messages. Total processed: {processed_count}")
+                  
+                  # If we've processed all messages, break
+                  if processed_count >= total_messages:
+                      break
+              
+              print(f"Total messages retrieved: {len(all_messages)}")
+              unmatched_events = []
+              
+              for message in all_messages:
+                  try:
+                      # # Debug: Print raw message structure
+                      # print("=== Raw Message Structure ===")
+                      # print(json.dumps(message, indent=2))
+                      
+                      # # Debug: Print message attributes if any
+                      # print("=== Message Attributes ===")
+                      # print(json.dumps(message.get('MessageAttributes', {}), indent=2))
+                      
+                      # # Debug: Print raw message body
+                      # print("=== Raw Message Body ===")
+                      # print(f"Type of message body: {type(message['Body'])}")
+                      # print(message['Body'])
+                      
+                      # Try to parse the message body
+                      try:
+                          original_event = json.loads(message['Body'])
+                          print("=== Parsed Event ===")
+                          print(json.dumps(original_event, indent=2))
+                      except json.JSONDecodeError as e:
+                          print(f"Failed to parse message body as JSON: {str(e)}")
+                          print("Message body content:")
+                          print(message['Body'])
+                          continue
+                      
+                      # Flag to track if event matches any rule
+                      matches_any_rule = False
+                      
+                      # Test event against each rule (except catch-all rule)
+                      for rule in rules:
+                          # Skip the catch-all rule and rules without patterns
+                          if not rule.get('EventPattern') or rule['Name'] == 'catch-all-rule':
+                              continue
+                          
+                          print(f"\nTesting against rule: {rule['Name']}")
+                          print("Rule pattern:")
+                          print(json.dumps(rule.get('EventPattern', {}), indent=2))
+                          
+                          try:
+                              match_result = test_event_pattern(events_client, rule, original_event)
+                              print(f"Match result: {match_result}")
+                              if match_result:
+                                  matches_any_rule = True
+                                  break
+                          except Exception as e:
+                              print(f"Error testing event pattern for rule {rule['Name']}: {str(e)}")
+                              continue
+                      
+                      # If event doesn't match any rule, add to unmatched events
+                      if not matches_any_rule:
+                          unmatched_events.append({
+                              'event': original_event,
+                              'messageId': message.get('MessageId', 'Unknown')
+                          })
+                      
+                      # Delete the message after processing
+                      
+                  except KeyError as e:
+                      print(f"Missing key in message structure: {str(e)}")
+                      print("Available keys in message:")
+                      print(list(message.keys()))
+                      continue
+                  except Exception as e:
+                      print(f"Unexpected error processing message: {str(e)}")
+                      import traceback
+                      print("Full traceback:")
+                      print(traceback.format_exc())
+                      continue
+              
+              # Log unmatched events to CloudWatch
+              if unmatched_events:
+                  print("\n=== UNMATCHED EVENTS FOUND ===")
+                  for event in unmatched_events:
+                      print(json.dumps({
+                          'message': 'Event does not match any rules',
+                          'event_data': event
+                      }, indent=2))
+              
+              print(f"\nProcessing complete. {len(all_messages)} messages processed, {len(unmatched_events)} unmatched events found.")
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': f"Processed {len(all_messages)} messages",
+                      'unmatched_events_count': len(unmatched_events)
+                  })
+              }
+
+
+
+
+      Environment:
+        Variables:
+          EVENT_BUS_NAME: !Ref OrderEventBus
+          QUEUE_URL: !Ref CatchAllQueue
+      MemorySize: 256
+      Timeout: 300  # 5 minutes
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EventBridgeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:ListRules
+                  - events:TestEventPattern
+                Resource: '*'
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt CatchAllQueue.Arn
+
+
+Outputs:
+  ProcessOrderQueueUrl:
+    Description: "URL of the Process Order Queue"
+    Value: !Ref ProcessOrderQueue
+
+  InverseMatchQueueUrl:
+    Description: "URL of the Inverse Match Queue"
+    Value: !Ref InverseMatchQueue
+
+  CatchAllQueueUrl: 
+    Description: "URL of the Catch All Queue"
+    Value: !Ref CatchAllQueue
+
+  EventBusArn:
+    Description: "ARN of the Event Bus"
+    Value: !GetAtt OrderEventBus.Arn
+
+  EventBusName:
+    Description: "Name of the Event Bus"
+    Value: !Ref OrderEventBus
+
+  FunctionName:
+    Description: Name of the Lambda function
+    Value: !Ref AnalyzerFunction
+  
+  FunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt AnalyzerFunction.Arn

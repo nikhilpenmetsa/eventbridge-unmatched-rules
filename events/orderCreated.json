@@ -1,0 +1,19 @@
+{
+    "version": "0",
+    "id": "fe325605-24bd-4121-9989-c7d2b1799235",
+    "detail-type": "OrderCreated",
+    "source": "order-service",
+    "account": "123456789012",
+    "time": "2024-01-10T15:30:00Z",
+    "region": "us-east-1",
+    "detail": {
+      "orderId": "ORD-001",
+      "customerId": "CUST-123",
+      "orderTotal": 99.99,
+      "items": [{
+        "productId": "PROD-001",
+        "quantity": 2,
+        "price": 49.99
+      }]
+    }
+  }
