@@ -43,6 +43,9 @@ The solution can be extended to:
 - Generate metrics and dashboards
 - Implement automated pattern analysis
 
+### Considerations
+There is a limit of 50 TPS for invoking test_event_pattern API. As the number of rules grows, or if the volume of events sent to the bus are high, the calls for invoking test_event_pattern API will be throttled.
+
 ## Usage Instructions
 
 ### Prerequisites
