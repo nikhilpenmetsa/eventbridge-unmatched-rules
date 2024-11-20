@@ -34,6 +34,8 @@ This project implements a more robust solution for catching unmatched events:
    - Identifies truly unmatched events (those matching no patterns)
    - Logs unmatched events to CloudWatch
 
+   ![Architecture](./img/unmatched_events_overview.drawio.png)
+
 ### Extension Possibilities
 The solution can be extended to:
 - Move unmatched events to a dedicated DLQ
